@@ -487,13 +487,18 @@ impl ConfigValidator {
             return Ok(());
         }
 
+        let cache_sync_enabled = matches!(&config.policy,   
+            PolicyConfig::CacheAware { enable_cache_sync, .. } if *enable_cache_sync  
+        ); 
+
         // Validate gRPC connection mode requires tokenizer configuration
         if matches!(config.connection_mode, ConnectionMode::Grpc { .. })
+            && cache_sync_enabled
             && config.tokenizer_path.is_none()
             && config.model_path.is_none()
         {
             return Err(ConfigError::ValidationFailed {
-                reason: "gRPC connection mode requires either --tokenizer-path or --model-path to be specified".to_string(),
+                reason: "HTTP mode with cache sync enabled requires either --tokenizer-path or --model-path to be specified".to_string(),
             });
         }
 

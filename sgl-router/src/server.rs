@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, signal, spawn};
 use tracing::{error, info, warn, Level};
+use crate::config::PolicyConfig;
 
 use crate::{
     config::{HistoryBackend, RouterConfig, RoutingMode},
@@ -933,8 +934,63 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         let tool_parser_factory = Some(ToolParserFactory::new());
 
         (tokenizer, reasoning_parser_factory, tool_parser_factory)
-    } else {
-        (None, None, None)
+    } else {  
+        // HTTP模式：检查是否启用缓存同步  
+        let cache_sync_enabled = matches!(&config.router_config.policy,   
+            PolicyConfig::CacheAware { enable_cache_sync, .. } if *enable_cache_sync  
+        );  
+        
+        if cache_sync_enabled {  
+            // HTTP模式 + 缓存同步：初始化tokenizer  
+            info!("Initializing tokenizer for HTTP mode with cache sync enabled");  
+            
+            let base_tokenizer = if config.router_config.use_mock_tokenizer {    
+                info!("Using MockTokenizer for testing");    
+                Arc::new(crate::tokenizer::mock::MockTokenizer::new()) as Arc<dyn Tokenizer>    
+            } else {    
+                let tokenizer_path = config  
+                    .router_config  
+                    .tokenizer_path  
+                    .clone()  
+                    .or_else(|| config.router_config.model_path.clone())  
+                    .ok_or_else(|| {  
+                        "HTTP mode with cache sync requires either --tokenizer-path or --model-path to be specified"  
+                            .to_string()  
+                    })?;    
+    
+                tokenizer_factory::create_tokenizer_with_chat_template_blocking(    
+                    &tokenizer_path,    
+                    config.router_config.chat_template.as_deref(),    
+                )  
+                .map_err(|e| {  
+                    format!(  
+                        "Failed to create tokenizer from '{}': {}. \
+                        Ensure the path is valid and points to a tokenizer file (tokenizer.json) \
+                        or a HuggingFace model ID. For directories, ensure they contain tokenizer files.",    
+                        tokenizer_path, e    
+                    )    
+                })?    
+            };  
+    
+            let tokenizer = if config.router_config.tokenizer_cache.enable_l0  
+                || config.router_config.tokenizer_cache.enable_l1  
+            {  
+                let cache_config = CacheConfig {  
+                    enable_l0: config.router_config.tokenizer_cache.enable_l0,  
+                    l0_max_entries: config.router_config.tokenizer_cache.l0_max_entries,  
+                    enable_l1: config.router_config.tokenizer_cache.enable_l1,  
+                    l1_max_memory: config.router_config.tokenizer_cache.l1_max_memory,  
+                };  
+                Some(Arc::new(CachedTokenizer::new(base_tokenizer, cache_config)) as Arc<dyn Tokenizer>)  
+            } else {  
+                Some(base_tokenizer)  
+            };  
+    
+            (tokenizer, None, None)  // HTTP模式下不需要reasoning和tool解析器  
+        } else {  
+            // HTTP模式无缓存同步：不初始化任何组件  
+            (None, None, None)  
+        }  
     };
 
     // Initialize worker registry and policy registry
